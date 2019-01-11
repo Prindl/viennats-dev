@@ -30,6 +30,11 @@ License:         MIT (X11), see file LICENSE in the base directory
 ///  Includes all Geometry In- and Output-related functions.
 namespace geometry {
 
+  // keeps how many nodes to expect for each vtk cell_type
+  // 0 means all numbers are allowed
+  // first element is a dummy
+  unsigned vtk_nodes_for_cell_type[15] = {0, 1, 0, 2, 0, 3, 0, 0, 4, 4, 4, 8, 8, 6, 5};
+
   template <int D> class geometry {
   public:
 
@@ -448,18 +453,23 @@ namespace geometry {
       bool change_input_parity,//=false,
       std::vector<double> shift//=std::vector<double>()
     ) {
+      // open geometry file
       std::ifstream f(FileName.c_str());
-
-      if (!f) msg::print_error("Failed reading geometry file!");
-
+      if (!f) msg::print_error("Could not open geometry file!");
       std::string c;
 
-      //read nodes
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
+      // Check if geometry is an unstructured grid as required
+      while(std::getline(f,c)){
+        if(c.find("DATASET") != std::string::npos) break;
+      }
+      if(c.find("UNSTRUCTURED_GRID") == std::string::npos){
+        msg::print_error("DATASET is not an UNSTRUCTURED_GRID!");
+      }
+
+      // Find POINTS in file to know number of nodes to read in
+      while(std::getline(f,c)){
+        if(c.find("POINTS") != std::string::npos) break;
+      }
       int num_nodes=atoi(&c[c.find(" ")+1]);
 
       Nodes.resize(num_nodes);
@@ -477,38 +487,97 @@ namespace geometry {
         }
       }
 
-      std::getline(f,c);
-      std::getline(f,c);
+      while(std::getline(f,c)){
+        if(c.find("CELLS") == 0) break;
+      }
+
+
       int num_elems=atoi(&c[c.find(" ")+1]);
 
-      Elements.resize(num_elems);
+      std::ifstream f_ct(FileName.c_str());   // stream to read cell CELL_TYPES
+      std::ifstream f_m(FileName.c_str());  //stream for material numbers if they exist
 
-      double elems_fake;
-      for (int i=0;i<num_elems;i++) {
+      // advance to cell types and check if there are the right number
+      while(std::getline(f_ct, c)){
+        if(c.find("CELL_TYPES") == 0) break;
+      }
+      int num_cell_types = atoi(&c[c.find(" ")+1]);
+      // need a cell_type for each cell
+      if(num_elems != num_cell_types){
+        msg::print_error("Corrupt input geometry! Number of CELLS and CELL_TYPES is different!");
+      }
 
-        for (int j=-1;j<(D+1);j++) {
-          if (j!=-1) {
-            f>>Elements[i][j];
-          } else {
-            f>>elems_fake;
+      bool is_material = true;
+      // advance to material if it is specified
+      while(std::getline(f_m,c)){
+        if(c.find("CELL_DATA") != std::string::npos){
+          std::getline(f_m,c);
+          if((c.find("SCALARS material") != std::string::npos)||(c.find("SCALARS Material") != std::string::npos)){
+            std::getline(f_m,c);
+            break;
           }
         }
       }
-
-      std::getline(f,c);
-      std::getline(f,c);
-      for (int i=0;i<num_elems;i++) {
-        std::getline(f,c);
-      }
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
-
-      Materials.resize(num_elems);
-      for (int i=0;i<num_elems;i++) {
-        f>>Materials[i];
+      if(f_m.eof()){
+        is_material = false;
       }
 
+      Elements.clear();
+      Elements.reserve(num_elems);
+
+      Materials.clear();
+
+      unsigned elems_fake;
+      unsigned cell_type;
+      unsigned cell_material;
+      for (int i=0;i<num_elems;i++) {
+        f >> elems_fake;
+        f_ct >> cell_type;
+        if(is_material) f_m >> cell_material;
+        else cell_material = 1; // if there are no materials specified make all the same
+
+        lvlset::vec<unsigned int, D+1> elem = lvlset::vec<unsigned int, D+1>();
+
+        // check if the correct number of nodes for cell_type is given
+        unsigned number_nodes = vtk_nodes_for_cell_type[cell_type];
+        if(number_nodes == elems_fake || number_nodes == 0){
+          // check for different types to subdivide them into supported types
+          switch (cell_type) {
+            case 5: //triangle for 2D
+            case 10: //tetra for 3D
+              for(unsigned j=0; j<number_nodes; ++j){
+                f >> elem[j];
+              }
+              Elements.push_back(elem);
+              Materials.push_back(cell_material);
+              break;
+
+            case 9:       //this is a quad, so just plit it into two triangles
+              for(unsigned j=0; j<3; ++j){
+                f >> elem[j];
+              }
+              Elements.push_back(elem);   //push the first three nodes as a triangle
+              Materials.push_back(cell_material);
+
+              f >> elem[1]; //replace middle element to create other triangle
+              Elements.push_back(elem);
+              Materials.push_back(cell_material);
+              break;
+
+            default:
+              std::ostringstream oss;
+              oss << "VTK Cell type " << cell_type << " is not supported. Cell ignored..." << std::endl;
+              msg::print_warning(oss.str());
+          }
+        }else{
+          msg::print_wrong_cell_type(D+1, number_nodes);
+          //ignore rest of lines
+          f.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        }
+      }
+
+      f_ct.close();
+      f_m.close();
       f.close();
 
     }
@@ -660,6 +729,8 @@ namespace geometry {
     std::vector<lvlset::vec<double, D> > Nodes;
     std::vector<lvlset::vec<unsigned int, D> > Elements;
 
+    static constexpr int dimension=D;
+
     lvlset::vec<double, D> Min,Max; //for bounding box
 
     unsigned int number_of_nodes() const {
@@ -759,14 +830,21 @@ namespace geometry {
       }
       //-------------------------------------------------------------------------------------------------------------------------
       std::ifstream f(FileName.c_str());
-
+      if (!f) msg::print_error("Could not open geometry file!");
       std::string c;
 
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
-      std::getline(f,c);
+      // Check if geometry is an unstructured grid as required
+      while(std::getline(f,c)){
+        if(c.find("DATASET") != std::string::npos) break;
+      }
+      if(c.find("UNSTRUCTURED_GRID") == std::string::npos){
+        msg::print_error("DATASET is not an UNSTRUCTURED_GRID!");
+      }
+
+      // Find POINTS
+      while(std::getline(f,c)){
+        if(c.find("POINTS") != std::string::npos) break;
+      }
       int num_nodes=atoi(&c[c.find(" ")+1]);
 
       Nodes.resize(num_nodes);
@@ -775,7 +853,6 @@ namespace geometry {
         double coords[3];
 
         for (int j=0;j<3;j++) f>>coords[j];
-
         for (int j=0;j<D;j++) {
           Nodes[i][j]=coords[InputTransformationDirections[j]];
           int shift_size=shift.size();
@@ -785,21 +862,31 @@ namespace geometry {
         }
       }
 
-      std::getline(f,c);
-      std::getline(f,c);
+      while(std::getline(f,c)){
+        if(c.find("CELLS") == 0) break;
+      }
+
       int num_elems=atoi(&c[c.find(" ")+1]);
 
-      Elements.resize(num_elems);
+      Elements.clear();
+      Elements.reserve(num_elems);
 
       double elems_fake;
       for (int i=0;i<num_elems;i++) {
 
-        for (int j=0;j<(D+1);j++) {
-          if (j!=0) {
-            f>>Elements[i][j-1];
-          } else {
-            f>>elems_fake;
+        lvlset::vec<unsigned int, D> elem = lvlset::vec<unsigned int, D>();
+
+        // TODO: change the following to read in different types of cells as well
+        f >> elems_fake;
+        if(elems_fake != D){
+          msg::print_wrong_cell_type(D, elems_fake);
+          //ignore rest of lines
+          f.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+        } else{
+          for(int j=0; j<D; ++j){
+            f >> elem[j];
           }
+          Elements.push_back(elem);
         }
       }
 
@@ -846,7 +933,7 @@ namespace geometry {
 
           for (int k=0;k<D;k++) tmp[k]=Geometry.Elements[i][(j+k)%(D+1)];
 
-          std::bitset<2*D> flags;
+          /*std::bitset<2*D> flags;
           flags.set();
 
           //if triangle at border skip
@@ -866,7 +953,7 @@ namespace geometry {
 
           //if (is_open_boundary_negative) flags.reset(open_boundary_direction); else flags.reset(open_boundary_direction+D);
 
-          if (flags.any()) continue;
+          if (flags.any()) continue;*/
 
           tmp.sort();
 
@@ -973,30 +1060,36 @@ namespace geometry {
       // }
     }
 
-    //Reads in a surface and transforms it to a levelset
+    //Reads in surfaces and transforms it to a levelset
     template<int D, class GridTraitsType, class ParameterType, class LevelSetType>
-    void import_levelset_from_surface(GridTraitsType& GridProperties, lvlset::grid_type<GridTraitsType>& grid,
-                                      ParameterType& p, std::list<LevelSetType>& LevelSets, const int& counter)
+    void import_levelsets_from_surface(GridTraitsType& GridProperties, lvlset::grid_type<GridTraitsType>& grid,
+                                      ParameterType& p, std::list<LevelSetType>& LevelSets)
     {
       int grid_min[D]={ };
       int grid_max[D]={ };
-      surface<D> s;
+      std::list< surface<D> > surfaces;
+
+
+      std::cout << "The geometry consists of " << p.geometry_files.size() <<" input surfaces. \n";
 
       //!surface.ReadVTK(...) reads surface file/s and modifies it/them according to the user-set parameters
-      std::cout << "The geometry consists of " << p.geometry_files.size() <<" input surfaces. \n";
-      msg::print_start("Read surface input file "+p.geometry_files[counter]+"...");
-      s.ReadVTK(p.geometry_files[counter], p.input_scale, p.input_transformation,
-                p.input_transformation_signs, p.change_input_parity, p.input_shift);
+      for(unsigned i=0; i<p.geometry_files.size(); ++i){
+        surfaces.push_back(surface<D>());
+        msg::print_start("Read surface input file " + p.geometry_files[i] + "...");
+        surfaces.back().ReadVTK(p.geometry_files[i], p.input_scale, p.input_transformation,
+                  p.input_transformation_signs, p.change_input_parity, p.input_shift);
 
-      for (int h = 0; h < D; ++h) {
-        grid_min[h] = std::min(grid_min[h],int(std::ceil(s.Min[h] / p.grid_delta - p.snap_to_boundary_eps)));
-        grid_max[h] = std::max(grid_max[h],int(std::floor(s.Max[h] / p.grid_delta + p.snap_to_boundary_eps)));
-      }
-      msg::print_done();
+        for (int h = 0; h < D; ++h) {
+          grid_min[h] = std::min(grid_min[h],int(std::ceil(surfaces.back().Min[h] / p.grid_delta - p.snap_to_boundary_eps)));
+          grid_max[h] = std::max(grid_max[h],int(std::floor(surfaces.back().Max[h] / p.grid_delta + p.snap_to_boundary_eps)));
+        }
+        msg::print_done();
 #ifdef VERBOSE
-      std::cout << "min = " << (s.Min) << "   " << "max = " << (s.Max) << std::endl;
-      std::cout << "min = " << (s.Min / p.grid_delta) << "   " << "max = " << (s.Max / p.grid_delta) << std::endl;
+        std::cout << "min = " << (surfaces.back().Min) << "   " << "max = " << (surfaces.back().Max) << std::endl;
+        std::cout << "min = " << (surfaces.back().Min / p.grid_delta) << "   " << "max = " << (surfaces.back().Max / p.grid_delta) << std::endl;
 #endif
+      }
+
       //!Determine boundary conditions for level set domain
       lvlset::boundary_type bnc[D];
       for (int hh = 0; hh < D; ++hh) {
@@ -1023,11 +1116,21 @@ namespace geometry {
       msg::print_start("Distance transformation...");
 
       //!Initialize the level set with "lvlset::init(...)"
-      LevelSets.push_back(LevelSetType(grid));
-      lvlset::init(LevelSets.back(), s, p.report_import_errors);
+      for(typename std::list< surface<D> >::const_iterator it= surfaces.begin(); it!=surfaces.end(); ++it){
+        LevelSets.push_back(LevelSetType(grid));
+        lvlset::init(LevelSets.back(), *it, p.report_import_errors);
+      }
 
       msg::print_done();
     }
+
+
+
+
+
+
+
+
 
     template<int D, class GridTraitsType, class ParameterType, class LevelSetType>
     void import_levelsets_from_volume(GridTraitsType& GridProperties, lvlset::grid_type<GridTraitsType>& grid,
@@ -1084,9 +1187,6 @@ namespace geometry {
 
       //!Transform the input volume geometry to surfaces and interfaces "TransformGeometryToSurfaces(...)"
       msg::print_start("Extract surface and interfaces...");
-      typedef std::list<surface<D> > SurfacesType;
-      SurfacesType Surfaces;
-
       std::bitset<2 * D> remove_flags;
 
       for (int i = 0; i < D; ++i) {
@@ -1105,6 +1205,9 @@ namespace geometry {
               remove_flags.set(i + D);
         }
       }
+
+      typedef std::list<surface<D> > SurfacesType;
+      SurfacesType Surfaces;
 
       //std::cout << "transform to surface\n";
       TransformGeometryToSurfaces(g, Surfaces, remove_flags, p.grid_delta * p.snap_to_boundary_eps, p.report_import_errors);

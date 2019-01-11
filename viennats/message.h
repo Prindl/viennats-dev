@@ -44,13 +44,13 @@ namespace msg {
     void print_help_extended() {
       std::cout << "USAGE:" << std::endl;
       std::cout << "SIMULATION: viennats parameterfile" << std::endl;
-      std::cout << "CONVERSION: viennats [-ls2vtk | -ls2dx | -p | -p2o] files..." << std::endl;
+      std::cout << "CONVERSION: viennats [-ls2vtk | -ls2dx | -p | -p2o] FILES" << std::endl;
       std::cout << "Options:" << std::endl;
       std::cout << "    -ls2vtk    Convert LVST file(s) to VTK file(s)." << std::endl;
       std::cout << "    -ls2dx     Convert LVST file(s) to DX file(s)." << std::endl;
       std::cout << "    -p         Print LVST file(s) to the console." << std::endl;
       std::cout << "    -p2o       Print LVST file(s) to TXT file(s)." << std::endl;
-      std::cout << "NOTE: File paths and names are taken from files." << std::endl;
+      std::cout << "NOTE: File paths and names are taken from FILES." << std::endl;
       std::cout << "Other:" << std::endl;
       std::cout << "   --help      Shows (extended) help." << std::endl;
       std::cout << "   --version   Shows version." << std::endl;
@@ -63,7 +63,12 @@ namespace msg {
     }
 
     void print_version() {
-      std::cout << "viennats " << VIENNATS_VERSION << std::endl;
+      std::cout << "viennats " << VIENNATS_VERSION;
+      #ifdef USE_HDF5
+      std::cout << " TDR" << std::endl;
+      #else
+      std::cout << std::endl;
+      #endif
       std::cout << "Copyright (C) 2008-2015  Institute for Microelectronics, TU Wien" << std::endl << std::endl;
       std::cout << "Contact: viennats@iue.tuwien.ac.at" << std::endl;
       std::cout << "GitHub: https://github.com/viennats/viennats-dev" << std::endl;
@@ -106,12 +111,19 @@ namespace msg {
     }
 
     void print_warning(const std::string& s) {
-        std::cout << "    WARNING: " << s << std::endl << std::endl;
+        std::cout << std::endl << "    WARNING: " << s << std::endl;
     }
 
     void print_error(const std::string& s) {
-        std::cout << "    ERROR: " << s << std::endl << std::endl;
+        std::cout << std::endl << "    ERROR: " << s << std::endl;
         abort();
+    }
+
+    void print_wrong_cell_type(const unsigned expected, const unsigned found){
+      std::ostringstream oss;
+      oss << "INVALID CELL TYPE! Expected number of nodes: "
+      << expected << ", Found number of nodes: " << found << "; Ignoring element..." << std::endl;
+      print_warning(oss.str());
     }
 
 
